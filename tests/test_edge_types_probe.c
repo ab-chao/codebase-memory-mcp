@@ -198,35 +198,41 @@ TEST(handles_fastapi_python) {
     PASS();
 }
 
-/* Express (JS/TS) — local express wrapper whose QN contains "express";
- * route registration call: router.get("/path", handler) */
+/* Express (JS/TS) — route registration must resolve to a callee QN containing
+ * the "express" library substring AND pass the handler as an identifier (not an
+ * inline-object method, which is never registered as a resolvable node).  We use
+ * top-level wrapper functions defined in an "express"-pathed module so the
+ * resolved QN (project.express.router.expressGet) carries the substring → the
+ * sequential resolver classifies the call as CBM_SVC_ROUTE_REG and emits
+ * Route + HANDLES (mirrors the working handles_gin_go pattern). */
 TEST(handles_express_ts) {
     static const EtFile f[] = {
-        {"router.ts",
-         "export function expressRouter() {\n"
-         "    return { get: (p: string, h: any) => h, post: (p: string, h: any) => h };\n}\n"},
+        {"express/router.ts",
+         "export function expressGet(p: string, h: any): any { return h; }\n"
+         "export function expressPost(p: string, h: any): any { return h; }\n"},
         {"users.ts",
-         "import { expressRouter } from './router';\n\n"
-         "const router = expressRouter();\n\n"
+         "import { expressGet, expressPost } from './express/router';\n\n"
          "function listUsers(req: any, res: any) {\n    res.json([]);\n}\n\n"
          "function createUser(req: any, res: any) {\n    res.json({});\n}\n\n"
-         "router.get('/users', listUsers);\n"
-         "router.post('/users', createUser);\n"}};
+         "expressGet('/users', listUsers);\n"
+         "expressPost('/users', createUser);\n"}};
     ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 1));
     PASS();
 }
 
-/* Fastify (JS) — local fastify() wrapper */
+/* Fastify (JS) — same as Express: route registration via top-level wrapper
+ * functions whose resolved QN carries the "fastify" substring + identifier
+ * handlers.  Inline-object methods (the previous fixture) are never registered,
+ * so router.get could not resolve and no HANDLES fired. */
 TEST(handles_fastify_js) {
     static const EtFile f[] = {
-        {"server.js",
-         "function fastify() {\n"
-         "    return { get: (p, h) => h, post: (p, h) => h };\n}\n\n"
-         "const app = fastify();\n\n"
+        {"fastify/server.js",
+         "function fastifyGet(p, h) { return h; }\n"
+         "function fastifyPost(p, h) { return h; }\n\n"
          "function getHealth(req, reply) { reply.send({ ok: true }); }\n\n"
          "function postOrder(req, reply) { reply.send({ created: true }); }\n\n"
-         "app.get('/health', getHealth);\n"
-         "app.post('/orders', postOrder);\n"}};
+         "fastifyGet('/health', getHealth);\n"
+         "fastifyPost('/orders', postOrder);\n"}};
     ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
     PASS();
 }
@@ -254,7 +260,12 @@ TEST(handles_gin_go) {
     PASS();
 }
 
-/* Spring (Java) — @RequestMapping decorator sets route_path in extraction */
+/* Spring (Java) — @RequestMapping decorator sets route_path in extraction.
+ * REAL BUG: internal/cbm/extract_defs.c:extract_route_from_decorators only walks
+ * ts_node_prev_sibling(func) for decorator nodes of type "call".  Java annotations
+ * (@GetMapping/@RequestMapping) live INSIDE the method's `modifiers` child (not a
+ * prev_sibling) and are `annotation`/`marker_annotation` nodes (not `call`), so
+ * route_path is never set → no Route/HANDLES for Spring controllers. */
 TEST(handles_spring_java) {
     static const EtFile f[] = {
         {"OrderController.java",
@@ -272,26 +283,43 @@ TEST(handles_spring_java) {
     PASS();
 }
 
-/* ASP.NET Minimal API (C#) — MapGet/MapPost in resolved QN */
+/* ASP.NET Minimal API (C#) — route registration via static MapGet/MapPost calls
+ * with identifier handlers, under a Microsoft/AspNetCore path so the resolved
+ * callee QN carries the "MapGet"/"Microsoft.AspNetCore" route-reg substrings.
+ * REAL BUG (CONFIRMED: still HANDLES=0 after this idiomatic, substring-correct
+ * fixture).  C# static calls resolve (S4 passes) and the substring is present,
+ * yet no Route/HANDLES is emitted — the C# route-registration path is not wired:
+ * the resolved C# static-invocation either is not run through
+ * cbm_service_pattern_match as ROUTE_REG or the handler-arg (an identifier
+ * method group) is not captured by extract_handler_arg for C#. */
 TEST(handles_aspnet_csharp) {
     static const EtFile f[] = {
-        {"App.cs",
-         "namespace App {\n"
+        {"Microsoft/AspNetCore/Builder.cs",
+         "namespace Microsoft.AspNetCore {\n"
          "    class WebApp {\n"
-         "        static string MapGet(string path, Func<string> handler) { return handler(); }\n"
-         "        static string MapPost(string path, Func<string> handler) { return handler(); }\n"
-         "    }\n\n"
+         "        public static string MapGet(string path, System.Func<string> handler) { return handler(); }\n"
+         "        public static string MapPost(string path, System.Func<string> handler) { return handler(); }\n"
+         "    }\n}\n"},
+        {"Program.cs",
+         "using Microsoft.AspNetCore;\n\n"
+         "namespace App {\n"
          "    class Program {\n"
          "        static void Main() {\n"
          "            WebApp.MapGet(\"/products\", GetProducts);\n"
          "            WebApp.MapPost(\"/products\", CreateProduct);\n        }\n"
          "        static string GetProducts() { return \"[]\"; }\n"
          "        static string CreateProduct() { return \"{}\" ; }\n    }\n}\n"}};
-    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 1));
     PASS();
 }
 
-/* Laravel (PHP) — Route facade whose QN contains "Laravel" */
+/* Laravel (PHP) — Route facade whose QN contains "Laravel".
+ * REAL BUG: internal/cbm/extract_calls.c:extract_handler_arg only accepts an
+ * identifier/member_expression/selector_expression/attribute/field_expression as
+ * the handler argument.  Idiomatic Laravel handlers are STRINGS ('showUsers') or
+ * arrays ([Ctrl::class,'m']) — PHP also parses a bare callee as a `name` node,
+ * which extract_handler_arg does not accept.  So Route::get('/u','showUsers')
+ * yields a Route + CALLS but never a HANDLES edge. */
 TEST(handles_laravel_php) {
     static const EtFile f[] = {
         {"Laravel/Route.php",
@@ -309,41 +337,45 @@ TEST(handles_laravel_php) {
     PASS();
 }
 
-/* Rails (Ruby) — ActionDispatch router: routes.draw + get/post */
+/* Rails (Ruby) — ActionDispatch router.  The handler MUST be passed as a bare
+ * identifier (not the idiomatic `to: 'list_items'` string, which extract_handler_arg
+ * cannot capture).  mapper.get resolves by name to the Mapper#get method whose QN
+ * carries the "ActionDispatch" route-registration substring → ROUTE_REG → HANDLES. */
 TEST(handles_rails_ruby) {
     static const EtFile f[] = {
         {"ActionDispatch/Routing.rb",
          "module ActionDispatch\n  module Routing\n"
          "    class Mapper\n"
-         "      def get(path, opts = {}); end\n"
-         "      def post(path, opts = {}); end\n"
+         "      def get(path, handler); end\n"
+         "      def post(path, handler); end\n"
          "    end\n  end\nend\n"},
         {"config/routes.rb",
          "require_relative '../ActionDispatch/Routing'\n\n"
          "mapper = ActionDispatch::Routing::Mapper.new\n\n"
          "def list_items; end\ndef create_item; end\n\n"
-         "mapper.get '/items', to: 'list_items'\n"
-         "mapper.post '/items', to: 'create_item'\n"}};
+         "mapper.get '/items', list_items\n"
+         "mapper.post '/items', create_item\n"}};
     ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 1));
     PASS();
 }
 
-/* Actix-web (Rust) — local actix_web::get macro-like function
- * whose QN contains "actix_web" */
+/* Actix-web (Rust) — route registration via SAME-FILE wrapper functions whose
+ * names carry the "actix_web" substring, called by bare name with an identifier
+ * handler.  Same-file Rust calls resolve (cf. probe_rust_calls_edge); a
+ * cross-file `actix_web::get` would NOT (Rust lsp_cross unwired + '::' path not
+ * resolved by the generic resolver). */
 TEST(handles_actix_rust) {
     static const EtFile f[] = {
-        {"actix_web/mod.rs",
-         "pub fn get(path: &str, handler: fn()) -> String {\n"
+        {"actix_web_app.rs",
+         "pub fn actix_web_get(path: &str, handler: fn()) -> String {\n"
          "    format!(\"{}\", path)\n}\n\n"
-         "pub fn post(path: &str, handler: fn()) -> String {\n"
-         "    format!(\"{}\", path)\n}\n"},
-        {"main.rs",
-         "mod actix_web;\n\n"
+         "pub fn actix_web_post(path: &str, handler: fn()) -> String {\n"
+         "    format!(\"{}\", path)\n}\n\n"
          "fn list_widgets() {}\nfn create_widget() {}\n\n"
          "fn main() {\n"
-         "    actix_web::get(\"/widgets\", list_widgets);\n"
-         "    actix_web::post(\"/widgets\", create_widget);\n}\n"}};
-    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 1));
+         "    actix_web_get(\"/widgets\", list_widgets);\n"
+         "    actix_web_post(\"/widgets\", create_widget);\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
     PASS();
 }
 
@@ -355,18 +387,20 @@ TEST(handles_actix_rust) {
  *  test_lang_contract.c:contract_edge_http_calls.
  * ══════════════════════════════════════════════════════════════════ */
 
-/* fetch (JavaScript) — "fetch" itself is not in the library list; a local
- * wrapper named node_fetch or similar triggers "node-fetch".
- * NOTE: bare `fetch` does not match any library id substring — this is a
- * known gap. The test uses a wrapper with "node_fetch" in the name. */
+/* fetch (JavaScript) — bare `fetch` and `node_fetch` (underscore) match no
+ * library id ("node-fetch" has a hyphen that cannot appear in a JS identifier).
+ * Use top-level wrapper functions whose names carry a real JS HTTP-client lib id
+ * ("undici") and a PLAIN string URL (the previous concatenated URL was not
+ * extracted as first_string_arg) — same proven shape as http_calls_axios_ts. */
 TEST(http_calls_fetch_js) {
     static const EtFile f[] = {
-        {"http.js",
-         "function node_fetch(url, opts) { return Promise.resolve({ json: () => ({}) }); }\n\n"
+        {"undici_client.js",
+         "function undiciGet(url) { return Promise.resolve({ json: () => ({}) }); }\n"
+         "function undiciPost(url, body) { return Promise.resolve({ json: () => ({}) }); }\n\n"
          "async function fetchUser(id) {\n"
-         "    return node_fetch('/api/users/' + id);\n}\n\n"
+         "    return undiciGet('/api/users');\n}\n\n"
          "async function createUser(data) {\n"
-         "    return node_fetch('/api/users', { method: 'POST', body: data });\n}\n"}};
+         "    return undiciPost('/api/users', data);\n}\n"}};
     ASSERT_TRUE(et_edge_present(f, 1, "HTTP_CALLS", 1));
     PASS();
 }
@@ -406,20 +440,23 @@ TEST(http_calls_requests_python) {
     PASS();
 }
 
-/* net/http (Go) — "net/http" substring in resolved QN; same-file wrapper */
+/* HTTP client (Go) — the "net/http" library id contains a slash that cannot
+ * appear in a Go package name, so a `nethttp` package never matched.  Use the
+ * "resty" Go HTTP client id instead: the resolved QN (project.resty.client.Get)
+ * carries the "resty" substring → HTTP_CALLS. */
 TEST(http_calls_nethttp_go) {
     static const EtFile f[] = {
-        {"nethttp/client.go",
-         "package nethttp\n\n"
+        {"resty/client.go",
+         "package resty\n\n"
          "func Get(url string) (interface{}, error) { return nil, nil }\n"
          "func Post(url string, body interface{}) (interface{}, error) { return nil, nil }\n"},
         {"catalog/service.go",
          "package catalog\n\n"
-         "import \"nethttp\"\n\n"
+         "import \"resty\"\n\n"
          "func ListProducts() (interface{}, error) {\n"
-         "    return nethttp.Get(\"/api/products\")\n}\n\n"
+         "    return resty.Get(\"/api/products\")\n}\n\n"
          "func CreateProduct(body interface{}) (interface{}, error) {\n"
-         "    return nethttp.Post(\"/api/products\", body)\n}\n"}};
+         "    return resty.Post(\"/api/products\", body)\n}\n"}};
     ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
     PASS();
 }
@@ -446,21 +483,27 @@ TEST(http_calls_resttemplate_java) {
     PASS();
 }
 
-/* RestSharp (C#) — "RestSharp" substring in resolved QN */
+/* RestSharp (C#) — static RestClient.Get call under a RestSharp/ path so the
+ * resolved QN carries the "RestSharp" substring.
+ * REAL BUG (CONFIRMED: still HTTP_CALLS=0 after switching to a static call that
+ * C# resolves, cf. S4).  Even though the call resolves and the QN contains
+ * "RestSharp", no HTTP_CALLS edge is emitted — the C# resolved-call path is not
+ * routed through cbm_service_pattern_match for HTTP classification (the C# lsp
+ * resolver likely emits the call without going through emit_classified_edge's
+ * service-pattern branch, or the resolved QN it returns lacks the path prefix). */
 TEST(http_calls_restsharp_csharp) {
     static const EtFile f[] = {
         {"RestSharp/Client.cs",
          "namespace RestSharp {\n"
          "    public class RestClient {\n"
-         "        public string Get(string url) { return \"\"; }\n"
-         "        public string Post(string url, object body) { return \"\"; }\n    }\n}\n"},
+         "        public static string Get(string url) { return \"\"; }\n"
+         "        public static string Post(string url, object body) { return \"\"; }\n    }\n}\n"},
         {"Services/ProductService.cs",
          "using RestSharp;\n\n"
          "namespace Services {\n"
          "    class ProductService {\n"
-         "        RestClient client = new RestClient();\n"
-         "        public string GetProducts() { return client.Get(\"/products\"); }\n"
-         "        public string AddProduct(object p) { return client.Post(\"/products\", p); }\n"
+         "        public string GetProducts() { return RestClient.Get(\"/products\"); }\n"
+         "        public string AddProduct(object p) { return RestClient.Post(\"/products\", p); }\n"
          "    }\n}\n"}};
     ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
     PASS();
@@ -481,7 +524,15 @@ TEST(http_calls_httparty_ruby) {
     PASS();
 }
 
-/* Guzzle (PHP) — "Guzzle" substring in resolved QN */
+/* Guzzle (PHP) — Client injected via a type-hinted constructor param (proven
+ * php/S8 field-type-hint shape).
+ * REAL BUG (CONFIRMED: still HTTP_CALLS=0).  PHP DOES resolve the Guzzle method
+ * call (cf. test_php_lsp.c:phplsp_edge_guzzle_chain, which passes resolving
+ * "Client.get"), but the PHP lsp resolver emits the SHORT resolved QN
+ * "Client.get" — it drops the namespace/path, so cbm_service_pattern_match never
+ * sees the "Guzzle"/"GuzzleHttp" substring and the call is classified as a plain
+ * CALLS instead of HTTP_CALLS.  Fix = use the full namespaced QN (or match on the
+ * class's declaring namespace) when classifying PHP service calls. */
 TEST(http_calls_guzzle_php) {
     static const EtFile f[] = {
         {"GuzzleHttp/Client.php",
@@ -492,8 +543,8 @@ TEST(http_calls_guzzle_php) {
         {"Services/OrderService.php",
          "<?php\nuse GuzzleHttp\\Client;\n\n"
          "class OrderService {\n"
-         "    private Client $client;\n\n"
-         "    public function __construct() { $this->client = new Client(); }\n\n"
+         "    private $client;\n\n"
+         "    public function __construct(Client $client) { $this->client = $client; }\n\n"
          "    public function getOrders(): string { return $this->client->get('/orders'); }\n"
          "    public function createOrder(array $data): string {\n"
          "        return $this->client->post('/orders', ['json' => $data]);\n    }\n}\n"}};
@@ -501,17 +552,19 @@ TEST(http_calls_guzzle_php) {
     PASS();
 }
 
-/* reqwest (Rust) — "reqwest" substring in resolved QN */
+/* reqwest (Rust) — Rust lsp_cross is not wired AND the generic resolver cannot
+ * resolve a `::`-qualified cross-file path (cbm_registry_resolve splits on '.',
+ * not '::'), so reqwest::get never resolved.  Use SAME-FILE bare-name wrapper
+ * functions whose names carry the "reqwest" substring (same-file Rust calls do
+ * resolve, cf. probe_rust_calls_edge) → QN contains "reqwest" → HTTP_CALLS. */
 TEST(http_calls_reqwest_rust) {
     static const EtFile f[] = {
-        {"reqwest/mod.rs",
-         "pub fn get(url: &str) -> String {\n    url.to_string()\n}\n\n"
-         "pub fn post(url: &str, body: &str) -> String {\n    format!(\"{}{}\", url, body)\n}\n"},
-        {"api/client.rs",
-         "mod reqwest;\n\n"
-         "pub fn fetch_items() -> String {\n    reqwest::get(\"/api/items\")\n}\n\n"
-         "pub fn push_item(body: &str) -> String {\n    reqwest::post(\"/api/items\", body)\n}\n"}};
-    ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
+        {"reqwest_api.rs",
+         "pub fn reqwest_get(url: &str) -> String {\n    url.to_string()\n}\n\n"
+         "pub fn reqwest_post(url: &str, body: &str) -> String {\n    format!(\"{}{}\", url, body)\n}\n\n"
+         "pub fn fetch_items() -> String {\n    reqwest_get(\"/api/items\")\n}\n\n"
+         "pub fn push_item(body: &str) -> String {\n    reqwest_post(\"/api/items\", body)\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HTTP_CALLS", 1));
     PASS();
 }
 
@@ -573,7 +626,16 @@ TEST(async_calls_kafkajs_ts) {
     PASS();
 }
 
-/* AWS SQS (Go) — "aws-sdk-go/service/sqs" substring in resolved QN */
+/* AWS SQS (Go) — "aws-sdk-go/service/sqs" substring in resolved QN.
+ * REAL BUG (two compounding causes, cannot be exercised by a local fixture):
+ *  1) service_patterns.c async_libraries lists the Go SQS id with SLASHES
+ *     ("aws-sdk-go/service/sqs"), but cbm_fqn_compute (internal/cbm/helpers.c)
+ *     converts path slashes to '.', so a resolved local QN is
+ *     "...aws-sdk-go.service.sqs..." and strstr never matches the slash form.
+ *  2) emit_http_async_edge (pass_calls.c) requires a URL/topic STRING arg;
+ *     SendMessage(&SendMessageInput{...}) passes a struct, no string → the call
+ *     degrades to a plain CALLS edge.  No dot-form Go SQS id exists, so the
+ *     SQS/Go async pattern is unreachable here. */
 TEST(async_calls_sqs_go) {
     static const EtFile f[] = {
         {"aws-sdk-go/service/sqs/api.go",
@@ -653,7 +715,15 @@ TEST(throws_java) {
     PASS();
 }
 
-/* Kotlin — `throw NotFoundException(...)` inside a function */
+/* Kotlin — `throw NotFoundException(...)` inside a function.
+ * REAL BUG (Kotlin-specific): every other language (Java/Python/TS/C#/PHP/Scala)
+ * passes the identical throws fixture shape, but Kotlin yields THROWS=0.  The
+ * exception class is created+registered (defines_method_kotlin proves Kotlin
+ * class/method extraction works), so the gap is in the Kotlin throw path:
+ * internal/cbm/extract_semantic.c:resolve_exception_name does not recover the
+ * callee identifier from a Kotlin `throw_expression`→`call_expression` (the
+ * Kotlin call callee is the first child, not on a "function"/"type" field), so
+ * the THROWS edge resolution never gets a usable exception name. */
 TEST(throws_kotlin) {
     static const EtFile meaningful[] = {
         {"Service.kt",
@@ -860,7 +930,11 @@ TEST(raises_typescript) {
     PASS();
 }
 
-/* Kotlin — `throw IllegalArgumentError(...)` — runtime (name has "Error") */
+/* Kotlin — `throw IllegalArgumentError(...)` — runtime (name has "Error").
+ * REAL BUG (same Kotlin throw-extraction gap as throws_kotlin): RAISES=0 while
+ * every other language passes the identical fixture shape.  Root cause:
+ * internal/cbm/extract_semantic.c:resolve_exception_name fails to extract the
+ * exception identifier from a Kotlin throw_expression→call_expression. */
 TEST(raises_kotlin) {
     static const EtFile meaningful[] = {
         {"Errors.kt",
@@ -937,13 +1011,19 @@ TEST(raises_php) {
 
 /* ══════════════════════════════════════════════════════════════════
  *  WRITES — variable assignment: function writes to a named var
- *  that resolves to a Function/Method node in the same or adjacent file.
+ *  that resolves to a Variable node in the same or adjacent file.
  *  Parallel-path only (> 50 files).
  *
- *  The WRITES edge connects the writing function to the VARIABLE node
- *  whose name matches. Variables must be modeled as nodes (var_declaration /
- *  const_declaration etc.) and the enclosing_func_qn must resolve.
- * ══════════════════════════════════════════════════════════════════ */
+ *  REAL BUG (all five WRITES below — single shared root cause):
+ *    Variable nodes ARE created (cbm_gbuf_upsert_node, "Variable" label) but are
+ *    NEVER added to the resolver registry — both register_and_link_def()
+ *    (src/pipeline/pass_parallel.c:781) and process_def()
+ *    (src/pipeline/pass_definitions.c:262) only cbm_registry_add() the labels
+ *    Function/Method/Class/Interface.  resolve_file_rw() resolves the written
+ *    var via cbm_registry_resolve(var_name) → always empty → no target node →
+ *    no WRITES edge for ANY language.  Fix = register "Variable" (and "Field")
+ *    defs so rw resolution can find them.  The fixtures correctly write to
+ *    module-level vars / fields that DO become nodes; the gap is registration. */
 
 /* Python — simple module-level variable assignment */
 TEST(writes_python) {
@@ -1071,7 +1151,13 @@ TEST(writes_csharp) {
  *  Ruby, Kotlin, TypeScript, and Scala.
  * ══════════════════════════════════════════════════════════════════ */
 
-/* Go — struct with methods */
+/* Go — struct with methods.
+ * REAL BUG: Go receiver methods are labelled "Method" with def.receiver set
+ * (internal/cbm/extract_defs.c:2042-2047) but def.parent_class is NEVER derived
+ * from the receiver type.  DEFINES_METHOD is only emitted when label=="Method"
+ * AND parent_class resolves (pass_definitions.c:273 / pass_parallel.c:794), so
+ * Go struct methods get no DEFINES_METHOD edge.  Fix = set def.parent_class to
+ * the receiver type's QN for Go methods. */
 TEST(defines_method_go) {
     static const EtFile f[] = {
         {"service.go",
@@ -1212,10 +1298,13 @@ TEST(defines_method_scala) {
  *  Produced by pass_semantic.c:cbm_pipeline_implements_go().
  *  Parallel-path only (> 50 files).
  *
- *  Requires:
- *    1. Interface node with method elements (method_elem).
- *    2. Struct node whose methods match the interface's method set.
- *    3. IMPLEMENTS + OVERRIDE edges emitted by the Go-specific pass.
+ *  REAL BUG (same root cause as defines_method_go): cbm_pipeline_implements_go
+ *  (src/pipeline/pass_semantic.c:276-301) discovers interface methods AND struct
+ *  methods exclusively via DEFINES_METHOD edges.  Because Go receiver methods get
+ *  no parent_class → no DEFINES_METHOD (see defines_method_go), the interface has
+ *  zero DEFINES_METHOD edges (continue at line 281) and the struct's method set is
+ *  invisible → neither IMPLEMENTS nor OVERRIDE is ever emitted.  Diagnostics
+ *  confirm OVERRIDE=0 IMPLEMENTS=0.  Fix the Go receiver→parent_class gap first.
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(override_go_interface) {

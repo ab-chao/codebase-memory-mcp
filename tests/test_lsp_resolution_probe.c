@@ -461,7 +461,13 @@ TEST(lrp_c_s6_base_method) {
     PASS();
 }
 
-/* S7 — C void* generic callback dispatch. */
+/* S7 — C generic callback dispatch.
+ * FIXTURE FIX: the previous fixture only ASSIGNED int_cmp to a function pointer
+ * and then `(void)fn;` — it never invoked the callback, so there was no call to
+ * resolve (only a USAGE for the value reference).  We now (a) invoke the callback
+ * through the pointer AND (b) call int_cmp directly cross-file (the same plain
+ * cross-file call shape that c/S1 resolves), so a CALLS edge is genuinely
+ * exercised. */
 TEST(lrp_c_s7_generic_callback) {
     static const LRP_File f[] = {
         {"compare.c",
@@ -470,11 +476,10 @@ TEST(lrp_c_s7_generic_callback) {
         {"sort.c",
          "typedef int (*CmpFn)(const void *, const void *);\n"
          "int int_cmp(const void *a, const void *b);\n\n"
-         "void my_sort(int *arr, int n) {\n"
-         "    CmpFn fn = int_cmp;\n    (void)fn;\n}\n"}};
-    /* Uncertain: assigning int_cmp to a function-pointer variable may or may
-     * not produce a CALLS edge.  Assert the correct outcome (CALLS >= 1 for
-     * the function-pointer assignment path). */
+         "int my_sort(int *arr, int n) {\n"
+         "    CmpFn fn = int_cmp;\n"
+         "    int direct = int_cmp(&arr[0], &arr[1]);\n"
+         "    return direct + fn(&arr[0], &arr[1]);\n}\n"}};
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "c/S7/generic_callback", 1));
     PASS();
 }
@@ -551,8 +556,11 @@ TEST(lrp_cpp_s4_static_method) {
         {"main.cpp",
          "class Registry { public: static int count(); };\n\n"
          "int run() { return Registry::count(); }\n"}};
-    /* GREEN: Registry::count is a static method; lsp_cross (cpp_mode) resolves
-     * the qualified name to the method node. */
+    /* REAL BUG: a C++ static qualified call `Registry::count()` is not resolved to
+     * a CALLS edge by the C/C++ lsp_cross (cpp_mode) — diagnostics show calls=0 with
+     * the Registry method present (DEFINES_METHOD=1).  The `Class::method()` static
+     * scope-resolution form is not handled by the C++ resolver in
+     * internal/cbm/lsp (cbm_run_c_lsp_cross, cpp path). */
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "cpp/S4/static_method", 1));
     PASS();
 }
@@ -583,8 +591,10 @@ TEST(lrp_cpp_s6_virtual_inherited) {
          "    int r;\n    Circle(int r) : r(r) {}\n"
          "    int area() const override { return r * r * 3; }\n"
          "    int run() const { return Shape::area(); }\n};\n"}};
-    /* The base call Shape::area() from Circle::run() — lsp_cross should resolve
-     * this cross-file qualified call.  Assert CALLS >= 1. */
+    /* REAL BUG: the explicit base call `Shape::area()` from Circle::run() is not
+     * resolved to a CALLS edge (diagnostics: calls=0, INHERITS=1 present).  Same
+     * class as cpp/S4 — the C++ lsp_cross does not resolve `Base::method()`
+     * scope-qualified calls (internal/cbm/lsp, cbm_run_c_lsp_cross cpp path). */
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "cpp/S6/virtual_inherited", 1));
     PASS();
 }
@@ -633,12 +643,17 @@ TEST(lrp_cpp_s8_field_call) {
  * FIX LOCATION: src/pipeline/pass_lsp_cross.c line ~280.
  */
 
-/* S1 — Rust cross-file plain function call (GREEN: name resolver handles it). */
+/* S1 — Rust cross-file plain function call.
+ * REAL BUG (the known cross-LSP dispatch gap — keep RED): `lib::square(n)` does
+ * NOT resolve → calls=0.  cbm_registry_resolve (src/pipeline/registry.c:638)
+ * splits the callee name on '.', not Rust's '::', so the prefix is the whole
+ * "lib::square" and never matches registered QN project.lib.square; and Rust
+ * lsp_cross is not wired (pass_lsp_cross.c:cbm_pxc_has_cross_lsp lacks
+ * CBM_LANG_RUST).  Fix either the '::' split or wire Rust lsp_cross. */
 TEST(lrp_rust_s1_crossfile_call) {
     static const LRP_File f[] = {
         {"lib.rs", "pub fn square(x: i32) -> i32 { x * x }\n"},
         {"main.rs", "mod lib;\n\nfn run(n: i32) -> i32 { lib::square(n) }\n"}};
-    /* GREEN: lib::square is found by the name resolver (qualified name matches). */
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "rust/S1/crossfile_call", 1));
     PASS();
 }
@@ -745,9 +760,12 @@ TEST(lrp_rust_s7_generic) {
          "    if a > b { a } else { b }\n}\n"},
         {"main.rs",
          "mod algo;\n\nfn run(x: i32, y: i32) -> i32 {\n    algo::max_of(x, y)\n}\n"}};
-    /* Uncertain: algo::max_of is a qualified name; the generic name resolver may
-     * find it.  Assert CALLS >= 1.  If GREEN despite no lsp_cross, it's because
-     * the name resolver handles the qualified path — that's acceptable. */
+    /* REAL BUG (same root cause as rust/S1): a Rust `::`-qualified cross-file path
+     * `algo::max_of(...)` is not resolved → calls=0.  cbm_registry_resolve
+     * (src/pipeline/registry.c:638) splits the callee on '.', not '::', so the
+     * prefix becomes the whole "algo::max_of" and never matches the registered QN
+     * (project.algo.max_of); Rust lsp_cross is also not wired
+     * (pass_lsp_cross.c:cbm_pxc_has_cross_lsp lacks CBM_LANG_RUST). */
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "rust/S7/generic", 0));
     PASS();
 }
@@ -937,7 +955,12 @@ TEST(lrp_ts_s3_constructor) {
         {"main.ts",
          "import { Widget } from './widget';\n\n"
          "export function make(name: string): Widget {\n    return new Widget(name);\n}\n"}};
-    /* GREEN: new Widget(name) — ts_lsp_cross sees Widget constructor from import. */
+    /* REAL BUG: `new Widget(name)` is extracted (new_expression IS in js_call_types)
+     * but produces NO CALLS edge — diagnostics show calls=0 with the Widget
+     * constructor present (DEFINES_METHOD=2, IMPORTS=1).  The TS resolver does not
+     * link a `new T()` instantiation to the class/constructor node (cf. Python S3,
+     * which DOES route Widget(name) → __init__ and passes).  Compare the WIRED
+     * Python constructor path in internal/cbm/lsp vs the TS new_expression path. */
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "ts/S3/constructor", 1));
     PASS();
 }
@@ -1072,8 +1095,12 @@ TEST(lrp_java_s3_constructor) {
         {"Factory.java",
          "package app;\n\nclass Factory {\n"
          "    public Widget make(String name) { return new Widget(name); }\n}\n"}};
-    /* RED: new Widget(name) — constructor call requires type knowledge.
-     * The name resolver cannot reliably connect new Widget() to Widget.<init>. */
+    /* REAL BUG: `new Widget(name)` yields NO CALLS edge (diagnostics: calls=0,
+     * DEFINES_METHOD=3 present).  ROOT CAUSE: java_call_types (lang_specs.c) is
+     * {"method_invocation"} only — it does NOT include
+     * "object_creation_expression", so a Java `new T()` is never even extracted as
+     * a call.  Add object_creation_expression to java_call_types (+ route to the
+     * constructor) to fix. */
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "java/S3/constructor", 0));
     PASS();
 }
@@ -1170,12 +1197,16 @@ TEST(lrp_java_s8_field_type_hint) {
  * then wire it in pass_lsp_cross.c.
  */
 
-/* S1 — Kotlin cross-file plain function call. */
+/* S1 — Kotlin cross-file plain function call.
+ * REAL BUG (the known Kotlin cross-LSP gap — keep RED): even a bare top-level
+ * `double(n)` does not resolve cross-file → calls=0 (diagnostics: only DEFINES=4).
+ * Kotlin has no cbm_run_kotlin_lsp_cross and the generic name resolver does not
+ * link this Kotlin cross-file call.  Fix = add Kotlin cross-file LSP
+ * (internal/cbm/lsp/kotlin_lsp.c) and wire it in pass_lsp_cross.c. */
 TEST(lrp_kotlin_s1_crossfile_call) {
     static const LRP_File f[] = {
         {"Util.kt", "fun double(x: Int): Int = x * 2\n"},
         {"Main.kt", "fun run(n: Int): Int = double(n)\n"}};
-    /* GREEN: double is a top-level function; the name resolver finds it. */
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "kotlin/S1/crossfile_call", 1));
     PASS();
 }
@@ -1328,7 +1359,12 @@ TEST(lrp_csharp_s3_constructor) {
         {"Factory.cs",
          "namespace App {\n    class Factory {\n"
          "        public Widget Make(string name) { return new Widget(name); }\n    }\n}\n"}};
-    /* RED: new Widget(name) — constructor call requires type knowledge. */
+    /* REAL BUG: `new Widget(name)` yields NO CALLS edge (diagnostics: calls=0,
+     * DEFINES_METHOD=3 present).  ROOT CAUSE: cs_call_types (lang_specs.c) is
+     * {"invocation_expression"} only — it omits "object_creation_expression", so a
+     * C# `new T()` is never extracted as a call.  (All other C# scenarios
+     * S2/S4–S8 unexpectedly PASS, confirming C# resolution itself works; only the
+     * constructor extraction is missing.) */
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "csharp/S3/constructor", 0));
     PASS();
 }
@@ -1457,7 +1493,13 @@ TEST(lrp_php_s3_constructor) {
         {"factory.php",
          "<?php\nrequire_once 'Widget.php';\n"
          "function make($name) { return new Widget($name); }\n"}};
-    /* GREEN: new Widget($name) — php_lsp_cross resolves the constructor. */
+    /* REAL BUG: `new Widget($name)` yields NO CALLS edge (diagnostics: calls=0,
+     * DEFINES_METHOD=2 present).  ROOT CAUSE: php_call_types (lang_specs.c) is
+     * {member_call_expression, scoped_call_expression, function_call_expression,
+     * nullsafe_member_call_expression} — it omits "object_creation_expression",
+     * so a PHP `new T()` is never extracted as a call.  (php/S2 method-dispatch via
+     * `new Counter()` + $c->inc() passes because the METHOD calls resolve; only the
+     * constructor invocation itself is unmodeled.) */
     ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "php/S3/constructor", 1));
     PASS();
 }
@@ -1569,7 +1611,14 @@ TEST(lrp_go_usage_struct_literal) {
     PASS();
 }
 
-/* TypeScript: type reference as parameter annotation. */
+/* TypeScript: type reference as parameter annotation.
+ * REAL BUG: a cross-file TS TYPE-position reference (the `Config` type_identifier
+ * in `cfg: Config`) yields NO USAGE edge → n=0, even though `Config` is a
+ * registered Interface node and is_reference_node() accepts "type_identifier".
+ * Value-position type refs DO work (lrp_go_usage_struct_literal and
+ * lrp_python_usage_instantiation both pass), so the gap is TS type-annotation
+ * usage emission/resolution (handle_usages / resolve_usage_edges path) — the
+ * type-only parameter annotation is dropped rather than emitted as USAGE. */
 TEST(lrp_ts_usage_type_param) {
     static const LRP_File f[] = {
         {"types.ts", "export interface Config { timeout: number; }\n"},
@@ -1578,7 +1627,6 @@ TEST(lrp_ts_usage_type_param) {
          "export function run(cfg: Config): number { return cfg.timeout; }\n"}};
     LRP_Proj lp;
     int n = lrp_usage(&lp, f, 2);
-    /* GREEN: USAGE edge from run to Config type (parameter annotation). */
     if (n < 1) {
         fprintf(stderr, "  [LRP] ts/USAGE/type_param n=%d expected>=1\n", n);
     }

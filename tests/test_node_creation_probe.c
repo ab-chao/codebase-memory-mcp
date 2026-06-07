@@ -250,7 +250,12 @@ TEST(probe_go_variadic_named_return) {
     PASS();
 }
 
-/* Go: method on a named struct type (Go labels methods as Function, not Method). */
+/* Go: method on a named struct type.
+ * ASSERTION CORRECTED: the original probe assumed "Go labels methods as Function",
+ * but extract_defs.c labels Go RECEIVER methods as "Method" (def.receiver set,
+ * label="Method"); only the plain top-level NewCounter is a "Function".  So the
+ * correct expectation is 3 callables total (NewCounter Function + Inc/Get Methods),
+ * i.e. functions + methods >= 3, not functions >= 3. */
 TEST(probe_go_method_on_struct) {
     NcpMetrics m = ncp_metrics("model.go",
         "package model\n\n"
@@ -259,8 +264,8 @@ TEST(probe_go_method_on_struct) {
         "func (c *Counter) Get() int { return c.n }\n\n"
         "func NewCounter() *Counter { return &Counter{} }\n");
     ASSERT_TRUE(m.ok);
-    /* At minimum NewCounter + Inc + Get must appear as Function nodes. */
-    ASSERT_TRUE(m.functions >= 3);
+    /* NewCounter is a Function; Inc + Get are Methods (receiver methods). */
+    ASSERT_TRUE(m.functions + m.methods >= 3);
     PASS();
 }
 
