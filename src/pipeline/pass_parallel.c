@@ -507,7 +507,7 @@ static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_file_info
             cbm_gbuf_upsert_node(ws->local_gbuf, "Route", def->route_path, route_qn,
                                  def->file_path ? def->file_path : fi->rel_path, 0, 0, rprops);
         char hprops[CBM_SZ_512];
-        char esc_h[CBM_SZ_256];
+        char esc_h[CBM_SZ_512];
         cbm_json_escape(esc_h, sizeof(esc_h), def->qualified_name);
         snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
         cbm_gbuf_insert_edge(ws->local_gbuf, func_id, route_id, "HANDLES", hprops);
@@ -1279,18 +1279,23 @@ static void emit_route_registration(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *sou
     char rp[CBM_SZ_256];
     snprintf(rp, sizeof(rp), "{\"method\":\"%s\"}", method ? method : "ANY");
     int64_t rid = cbm_gbuf_upsert_node(gbuf, "Route", route_path, rqn, "", 0, 0, rp);
-    char props[CBM_SZ_512];
+    char esc_cn[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
+    char esc_rp[CBM_SZ_512];
+    cbm_json_escape(esc_cn, sizeof(esc_cn), call->callee_name);
+    cbm_json_escape(esc_rp, sizeof(esc_rp), route_path);
+    char props[CBM_SZ_1K];
     snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"route_registration\"}",
-             call->callee_name, route_path);
+             "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"route_registration\"}", esc_cn,
+             esc_rp);
     cbm_gbuf_insert_edge(gbuf, source->id, rid, "CALLS", props);
     if (handler_ref && handler_ref[0] != '\0') {
         cbm_resolution_t hres = cbm_registry_resolve(registry, handler_ref, module_qn, ik, iv, ic);
         if (hres.qualified_name && hres.qualified_name[0] != '\0') {
             const cbm_gbuf_node_t *h = cbm_gbuf_find_by_qn(main_gbuf, hres.qualified_name);
             if (h) {
-                char hp[CBM_SZ_256];
-                char esc_h2[CBM_SZ_256];
+                char hp[CBM_SZ_1K]; /* must exceed escaped value + wrapper or snprintf cuts the
+                                       closing brace */
+                char esc_h2[CBM_SZ_512];
                 cbm_json_escape(esc_h2, sizeof(esc_h2), hres.qualified_name);
                 snprintf(hp, sizeof(hp), "{\"handler\":\"%s\"}", esc_h2);
                 cbm_gbuf_insert_edge(gbuf, h->id, rid, "HANDLES", hp);
