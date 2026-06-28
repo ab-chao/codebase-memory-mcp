@@ -2,14 +2,16 @@
  * httpd.h — First-party HTTP/1.1 server transport for the graph UI.
  *
  * Original implementation written for this project from RFC 9112 and the
- * needs of the graph-UI endpoints. Localhost-only by construction.
+ * needs of the graph-UI endpoints. All-interface by default (LAN access
+ * behind a reverse proxy — see the CORS comment in http_server.c).
  *
  * Design constraints (deliberate — do not "improve" without reading this):
  *   - SINGLE-THREADED, sequential request handling. The routing layer
  *     (http_server.c) keeps per-request state in static buffers; a thread
  *     pool would break it. One stalled client can hold the loop for at most
  *     the receive deadline (default 5 s) — acceptable for a localhost tool.
- *   - Binds 127.0.0.1 only (IPv4 loopback). Never any other interface.
+ *   - Binds 0.0.0.0 (all interfaces) so the UI is reachable from LAN
+ *     behind a reverse proxy. Security relies on the reverse proxy, not CORS.
  *   - Every response carries explicit Content-Length and "Connection: close";
  *     keep-alive is intentionally NOT implemented (smaller parsing surface;
  *     loopback reconnects are sub-millisecond). Known trade-off: on Windows,
@@ -55,7 +57,7 @@ typedef struct {
 
 /* ── Listener lifecycle ───────────────────────────────────────── */
 
-/* Listen on 127.0.0.1:<port>. port 0 binds an ephemeral port (tests).
+/* Listen on 0.0.0.0:<port> (all interfaces). port 0 binds an ephemeral port (tests).
  * Returns NULL if the port is unavailable. */
 cbm_httpd_t *cbm_httpd_listen(int port);
 
@@ -110,8 +112,8 @@ int cbm_http_parse_head(const char *data, size_t len, cbm_http_req_t *req, size_
                         size_t *content_length);
 
 /* Exact match, or prefix match when `pattern` ends with '*'.
- * Used for both route patterns ("/api/layout*", "/assets" + star) and the
- * CORS origin allow-list ("http://localhost:*", "http://127.0.0.1:*"). */
+ * Used for route patterns ("/api/layout*", "/assets*"). CORS is handled
+ * separately via origin reflection (see http_server.c:update_cors). */
 bool cbm_http_path_match(const char *str, const char *pattern);
 
 /* Extract a query parameter value, percent-decoded (%XX and '+' → space).

@@ -133,12 +133,12 @@ cbm_httpd_t *cbm_httpd_listen(int port) {
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 #endif
 
-    /* Loopback only — never any other interface. */
+    /* All interfaces — LAN access supported behind a reverse proxy. */
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons((unsigned short)port);
-    addr.sin_addr.s_addr = htonl(0x7F000001); /* 127.0.0.1 */
+    addr.sin_addr.s_addr = htonl(INADDR_ANY); /* 0.0.0.0 */
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(fd, 16) != 0) {
         cbm_sock_close(fd);
