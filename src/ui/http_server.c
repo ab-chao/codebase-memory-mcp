@@ -10,7 +10,7 @@
  *   GET/POST /api/... → UI support endpoints (layout, index, browse, …)
  *   *                 → 404
  *
- * Runs in a background pthread. Binds to 127.0.0.1 only (see httpd.c).
+ * Runs in a background pthread. Binds to all interfaces (see httpd.c — INADDR_ANY).
  * Has its own cbm_mcp_server_t with a separate SQLite connection (WAL reader).
  */
 #include "ui/http_server.h"
@@ -59,20 +59,18 @@
 static char g_cors[256];      /* CORS headers only */
 static char g_cors_json[512]; /* CORS + Content-Type: application/json */
 
-/* Inspect the Origin header and only reflect it if it's a localhost URL.
- * This prevents remote websites from making cross-origin requests to the
- * local graph-ui server (the key defense against CORS-based data exfil). */
+/* Reflect any Origin (LAN/reverse-proxy access). Security relies on the
+ * reverse proxy (e.g., Caddy/Nginx) to gate external traffic, not CORS. */
 static void update_cors(const cbm_http_req_t *req) {
-    if (req->origin[0] != '\0' && (cbm_http_path_match(req->origin, "http://localhost:*") ||
-                                   cbm_http_path_match(req->origin, "http://127.0.0.1:*"))) {
+    if (req->origin[0] != '\0') {
         snprintf(g_cors, sizeof(g_cors),
                  "Access-Control-Allow-Origin: %s\r\n"
                  "Access-Control-Allow-Methods: POST, GET, DELETE, OPTIONS\r\n"
                  "Access-Control-Allow-Headers: Content-Type\r\n",
                  req->origin);
     } else {
-        /* No Access-Control-Allow-Origin → browser blocks cross-origin access */
         snprintf(g_cors, sizeof(g_cors),
+                 "Access-Control-Allow-Origin: *\r\n"
                  "Access-Control-Allow-Methods: POST, GET, DELETE, OPTIONS\r\n"
                  "Access-Control-Allow-Headers: Content-Type\r\n");
     }
@@ -1357,7 +1355,7 @@ cbm_http_server_t *cbm_http_server_new(int port) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", srv->port);
     char url[64];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d", srv->port);
+    snprintf(url, sizeof(url), "http://0.0.0.0:%d", srv->port);
     cbm_log_info("ui.serving", "url", url, "port", port_str);
 
     return srv;

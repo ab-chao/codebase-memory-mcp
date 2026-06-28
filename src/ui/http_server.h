@@ -1,7 +1,7 @@
 /*
  * http_server.h — Embedded HTTP server for the graph visualization UI.
  *
- * Binds to 127.0.0.1:<port> only (localhost).
+ * Binds to 0.0.0.0:<port> (all interfaces); LAN access behind a reverse proxy.
  * Serves embedded frontend assets and proxies /rpc to a dedicated
  * read-only cbm_mcp_server_t instance.
  *
